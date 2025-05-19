@@ -1,6 +1,16 @@
-openai>=1.0.0
-Pillow>=10.0.0
-opencv-python>=4.8.0
-numpy>=1.24.0
-PyAudio>=0.2.13
-SpeechRecognition>=3.10.0 
+# Core dependencies
+python-dotenv==0.19.2
+openai==0.27.8
+tkinter  # Usually comes with Python installation
+
+# Audio recording and processing
+PyAudio==0.2.13
+sounddevice==0.4.5
+numpy==1.24.3
+
+# GPIO and keyboard for input handling
+gpiozero==1.6.2
+keyboard==0.13.5
+
+# For Raspberry Pi
+RPi.GPIO==0.7.1  # Only needed on Raspberry Pi, can be commented out for dev 

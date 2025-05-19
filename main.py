@@ -38,9 +38,15 @@ class TranslationApp:
         self.is_recording = False
         self.is_processing = False
         self.is_showing_results = False
+        self.is_scene_active = False  # New flag to track if scene is active
+        self.live_transcription_active = False  # New flag for live transcription
         self.last_transcription = ""
         self.last_translation = ""
         self.detected_language = ""
+        
+        # Add cooldown system to prevent accidental re-entry
+        self.last_action_time = 0
+        self.cooldown_period = 1.0  # 1 second cooldown between state transitions
         
         # Initialize language settings - all use auto-detection now
         self.language_settings = [
@@ -74,8 +80,7 @@ class TranslationApp:
     def setup_button_handlers(self):
         """Set up callbacks for button inputs"""
         self.input_handler.register_callback('button1', self.switch_scene)
-        self.input_handler.register_callback('button2', self.trigger_transcription)
-        self.input_handler.register_callback('button3', self.handle_context_action)
+        self.input_handler.register_callback('button3', self.handle_scene_action)
     
     def load_current_scene(self):
         """Load the current scene based on the scene index"""
@@ -83,47 +88,224 @@ class TranslationApp:
         for scene in self.scenes:
             scene.hide()
         
+        # Reset state BEFORE showing the new scene
+        self.is_showing_results = False
+        self.is_recording = False
+        self.is_processing = False
+        self.is_scene_active = False
+        self.live_transcription_active = False
+        
         # Set and show the current scene
         self.current_scene = self.scenes[self.current_scene_index]
         self.current_scene.show()
         
         # Update the window immediately to prevent flickering
         self.root.update_idletasks()
-        
-        # Reset state
-        self.is_showing_results = False
-        self.is_recording = False
-        self.is_processing = False
     
     def switch_scene(self):
-        """Switch to the next scene in the cycle"""
-        if self.is_recording or self.is_processing:
-            print("Cannot switch scene while recording or processing")
+        """Switch to the next scene in the cycle - ONLY for scrolling between scenes"""
+        # Apply cooldown to prevent accidental triggers
+        current_time = time.time()
+        if current_time - self.last_action_time < self.cooldown_period:
+            print(f"Ignoring button press - cooldown active ({self.cooldown_period}s)")
             return
             
+        # Button 1 should ONLY be used for scrolling between scenes
+        # If we're in an active feature, DO NOT exit it - just ignore the button press
+        if self.is_scene_active:
+            print(f"Ignoring scene switch while in active feature. Use Button 3 to exit first.")
+            return
+        
+        # First, stop any active processes in the current scene
+        self.reset_state()
         # Hide current scene first (smoother transition)
         self.current_scene.hide()
-        
         # Move to the next scene
         self.current_scene_index = (self.current_scene_index + 1) % len(self.scenes)
         print(f"Switching to Scene {self.current_scene_index + 1} - {self.language_settings[self.current_scene_index]['name']}")
-        
-        # Show the new scene
-        self.current_scene = self.scenes[self.current_scene_index]
-        self.current_scene.show()
-        
-        # Update immediately
-        self.root.update_idletasks()
-        
-        # Reset state
+        # Reset state BEFORE showing the new scene
         self.is_showing_results = False
         self.is_recording = False
         self.is_processing = False
+        self.is_scene_active = False
+        self.live_transcription_active = False
+        # Show the new scene
+        self.current_scene = self.scenes[self.current_scene_index]
+        self.current_scene.show()
+        # Update immediately
+        self.root.update_idletasks()
+        
+        # Update last action time
+        self.last_action_time = current_time
+        
+    def reset_state(self):
+        """Reset all state flags and stop all processes"""
+        self.stop_current_processes()
+        self.is_scene_active = False
+        self.live_transcription_active = False
+        self.is_recording = False
+        self.is_processing = False
+        self.is_showing_results = False
+
+    def handle_scene_action(self):
+        """Handle scene-specific actions based on Button3 press"""
+        # Apply cooldown to prevent accidental triggers
+        current_time = time.time()
+        if current_time - self.last_action_time < self.cooldown_period:
+            print(f"Ignoring button press - cooldown active ({self.cooldown_period}s)")
+            return
+            
+        # Update last action time immediately to prevent double-triggers
+        self.last_action_time = current_time
+        
+        # FORCE EXIT ANY ACTIVE SCENE IMMEDIATELY when Button 3 is pressed
+        if self.is_scene_active or self.is_showing_results:
+            print(f"FORCE EXITING Scene {self.current_scene_index + 1} - Restoring initial state")
+            # Kill any active processes immediately
+            if hasattr(self, 'voice_processor') and self.voice_processor:
+                try:
+                    self.voice_processor.stop_live_transcription()
+                except Exception as e:
+                    print(f"Error stopping voice processor: {e}")
+            
+            # Force reset all state flags
+            self.is_scene_active = False
+            self.live_transcription_active = False
+            self.is_recording = False
+            self.is_processing = False
+            self.is_showing_results = False
+            
+            # Kill any running threads or processes
+            self.stop_current_processes()
+            
+            # COMPLETELY RELOAD THE SCENE FROM SCRATCH
+            # This ensures we go back to the proper initial state
+            print(f"Reloading scene {self.current_scene_index + 1} from scratch")
+            
+            # First hide the current scene
+            self.current_scene.hide()
+            
+            # Completely recreate the scene object to ensure a fresh state
+            scene_index = self.current_scene_index
+            scene_classes = [GUI, GUI1, GUI2]
+            self.scenes[scene_index] = scene_classes[scene_index](self.root)
+            self.current_scene = self.scenes[scene_index]
+            
+            # Set up and show the fresh scene
+            self.current_scene.setup()
+            self.current_scene.show()
+            
+            # Force update the UI
+            self.root.update_idletasks()
+            
+            # Set a longer cooldown after exiting to prevent accidental re-entry
+            self.last_action_time = current_time
+            return
+            
+        # If we're not in an active scene, activate the current scene
+        print(f"Activating Scene {self.current_scene_index + 1}")
+        self.is_scene_active = True
+        
+        # Scene-specific actions
+        if self.current_scene_index == 0:  # Scene 1 (Transcription)
+            self.start_live_transcription()
+                
+        elif self.current_scene_index == 1:  # Scene 2 (Translation)
+            self.start_live_transcription()
+                
+        elif self.current_scene_index == 2:  # Scene 3 (Camera)
+            try:
+                # Start camera (placeholder for actual camera implementation)
+                print("Camera started")
+                self.camera_active = True
+                
+                # Show camera started message
+                self.current_scene.clear() 
+                
+                # Get screen dimensions
+                screen_width = self.root.winfo_width() or 720
+                screen_height = self.root.winfo_height() or 1080
+                center_x = screen_width / 2
+                center_y = screen_height / 2
+                
+                # Create a black background to ensure visibility
+                self.current_scene.canvas.create_rectangle(
+                    0, 0, screen_width, screen_height, 
+                    fill="#000000", outline=""
+                )
+                
+                # Calculate the image position (assuming it's at the top 40% of the screen)
+                image_center_y = screen_height * 0.3  # Image is at about 30% from the top
+                
+                # Position text BELOW the image
+                title_y = int(screen_height * 0.55)  # Title at 55% from top (below image)
+                status_y = int(screen_height * 0.7)  # Status at 70% from top
+                dot_y = int(screen_height * 0.85)  # Dot at 85% from top
+                
+                # Add a visual indicator box for the title text
+                self.current_scene.canvas.create_rectangle(
+                    screen_width * 0.1,  # 10% from left
+                    title_y - (int(screen_height * 0.12) * 0.8),  # Above text
+                    screen_width * 0.9,  # 90% from left
+                    title_y + (int(screen_height * 0.12) * 0.8),  # Below text
+                    fill="#333333",  # Dark gray background
+                    outline="#FFFF00",  # Yellow outline
+                    width=3  # Thick outline
+                )
+                
+                # Add a title below the image with much larger text
+                self.current_scene.center_text(
+                    "CAMERA MODE", 
+                    title_y, 
+                    font_size=int(screen_height * 0.12),  # 12% of screen height (much larger)
+                    fill="#FFFF00"  # Bright yellow for better visibility
+                )
+                
+                # Add a visual indicator box for the status text
+                self.current_scene.canvas.create_rectangle(
+                    screen_width * 0.1,  # 10% from left
+                    status_y - (int(screen_height * 0.15) * 0.8),  # Above text
+                    screen_width * 0.9,  # 90% from left
+                    status_y + (int(screen_height * 0.15) * 0.8),  # Below text
+                    fill="#333333",  # Dark gray background
+                    outline="#FF0000",  # Red outline
+                    width=3  # Thick outline
+                )
+                
+                # Add the recording status below the title with very large font and bright red color
+                self.current_scene.center_text(
+                    "RECORDING", 
+                    status_y, 
+                    font_size=int(screen_height * 0.15),  # 15% of screen height (very large)
+                    fill="#FF0000"  # Bright red
+                )
+                
+                # Add a recording indicator dot at the bottom
+                dot_radius = int(min(screen_width, screen_height) * 0.03)  # 3% of smaller dimension
+                dot_x = center_x  # Center horizontally
+                
+                self.current_scene.canvas.create_oval(
+                    dot_x - dot_radius, dot_y - dot_radius,
+                    dot_x + dot_radius, dot_y + dot_radius,
+                    fill="#FF0000", outline=""
+                )
+                
+                # Force immediate update
+                self.root.update()
+                
+                # Placeholder for actual camera functionality
+                # You'd typically initialize the camera here and start a video stream
+                # For now, we're just showing a message
+                
+                self.root.update_idletasks()
+            except Exception as e:
+                print(f"Camera error: {e}")
+                self.show_error(f"Camera error: {str(e)}")
+                self.is_scene_active = False
     
-    def trigger_transcription(self):
-        """Start the transcription process"""
-        if self.is_recording or self.is_processing:
-            print("Already recording or processing")
+    def start_live_transcription(self):
+        """Start continuous live transcription"""
+        if self.live_transcription_active:
             return
             
         # Get the current language settings
@@ -131,46 +313,184 @@ class TranslationApp:
         source_lang = current_language["code"]  # This will be None for auto-detection
         target_lang = current_language["target"]
         
-        # Special behavior for Scene 3 - quick action mode
-        auto_mode = (self.current_scene_index == 2)
+        # Prepare the UI for live transcription
+        self.current_scene.clear()
+        self.current_scene.canvas.create_rectangle(0, 0, 720, 1080, fill="#000000", outline="")
         
-        # Start the recording indicator
-        self.is_recording = True
-        self.show_recording_screen()
+        # Add a header - store the ID to update it later
+        header_title = "Russian Translation" if self.current_scene_index == 1 else "Live Transcription"
+        self.header_text_id = self.current_scene.center_text(header_title, 100, font_size=40)
+        self.detected_language_text_id = self.current_scene.center_text("Listening...", 160, font_size=30)
         
-        # Process voice in a separate thread to avoid blocking the UI
-        threading.Thread(
-            target=self.process_voice_background,
-            args=(source_lang, target_lang, auto_mode),
-            daemon=True
-        ).start()
+        # Create a separator line
+        self.current_scene.canvas.create_line(
+            100, 200, 620, 200, fill="#FFFFFF", width=2
+        )
+        
+        # This will hold the transcription text
+        self.live_transcription_text_id = None
+        
+        # Start live transcription
+        self.live_transcription_active = True
+        self.voice_processor.start_live_transcription(
+            source_lang=source_lang,
+            target_lang=target_lang,
+            callback=self.update_live_transcription
+        )
+        
+        # Update UI immediately
+        self.root.update_idletasks()
     
-    def process_voice_background(self, source_lang, target_lang, auto_mode):
-        """Process voice recording and transcription in background"""
-        try:
-            # Set the processing flag
-            self.is_processing = True
+    def update_live_transcription(self, transcription, translation, detected_lang):
+        """Callback for updating the live transcription UI"""
+        if not self.live_transcription_active:
+            return
             
-            # Process the voice input
-            transcription, translation, detected_lang = self.voice_processor.process_voice(
-                source_lang, target_lang, auto_mode
+        try:
+            # Update detected language text
+            display_language = detected_lang.capitalize() if detected_lang else "Detecting..."
+            self.current_scene.canvas.itemconfig(
+                self.detected_language_text_id,
+                text=f"Detected: {display_language}"
             )
             
-            # Store the results
-            self.last_transcription = transcription
-            self.last_translation = translation
-            self.detected_language = detected_lang
+            # Clear previous text
+            if self.live_transcription_text_id:
+                self.current_scene.canvas.delete(self.live_transcription_text_id)
             
-            # Show the results
-            self.root.after(0, self.show_results)
+            # Determine what text to display based on the scene
+            if self.current_scene_index == 1:  # Scene 2 (Translation)
+                # For translation scene, show only the translated text (Russian)
+                # Need to translate if not already done
+                if transcription and (translation is None or translation == ""):
+                    print(f"Need to translate: '{transcription}'")
+                    # Always attempt to translate to Russian regardless of detected language
+                    try:
+                        # Get target language (Russian)
+                        target_lang = self.language_settings[self.current_scene_index]["target"]
+                        source_lang = "en"  # Default to English if we can't detect
+                        
+                        # If we have a detected language, use it
+                        if detected_lang:
+                            if "english" in detected_lang.lower() or "en" == detected_lang.lower():
+                                source_lang = "en"
+                            elif "russian" in detected_lang.lower() or "ru" == detected_lang.lower():
+                                source_lang = "ru"
+                            elif "korean" in detected_lang.lower() or "ko" == detected_lang.lower():
+                                source_lang = "ko"
+                            # Add more language detections as needed
+                        
+                        print(f"Translating from {source_lang} to {target_lang}...")
+                        translation = self.voice_processor.translator.translate(
+                            transcription, source_lang, target_lang
+                        )
+                        print(f"Translated to Russian: {translation}")
+                    except Exception as e:
+                        print(f"Translation error: {e}")
+                        translation = "Translation error"
+                
+                # Display the translation or waiting message
+                display_text = translation or "Waiting for speech to translate..."
+                display_title = "Russian Translation"
+            else:
+                # For other scenes, show the transcription
+                display_text = transcription or "Listening..."
+                display_title = "Transcription"
+                
+            # Update the header to indicate what's being shown
+            self.current_scene.canvas.itemconfig(
+                self.header_text_id,
+                text=display_title
+            )
+            
+            # Get screen dimensions for adaptive sizing
+            screen_width = self.root.winfo_width() or 720
+            screen_height = self.root.winfo_height() or 1080
+            
+            # Make sure we have a black background for better visibility
+            self.current_scene.canvas.create_rectangle(
+                0, 0, screen_width, screen_height,
+                fill="#000000", outline=""
+            )
+            
+            # Calculate the position of the image (it's at the center of the screen)
+            image_center_x = screen_width / 2
+            image_center_y = screen_height * 0.4  # Image is at about 40% from the top
+            
+            # Position text BELOW the image (at about 70% from the top)
+            text_position_y = int(screen_height * 0.7)  # Position text below the image
+            
+            # Use much larger font size for better visibility
+            adaptive_font_size = int(screen_height * 0.08)  # 8% of screen height (much larger)
+            adaptive_width = int(screen_width * 0.9)  # 90% of screen width
+            
+            # Add a visual indicator to show where text should appear
+            self.current_scene.canvas.create_rectangle(
+                screen_width * 0.1,  # 10% from left
+                text_position_y - (adaptive_font_size * 1.5),  # Above text
+                screen_width * 0.9,  # 90% from left
+                text_position_y + (adaptive_font_size * 1.5),  # Below text
+                fill="#333333",  # Dark gray background
+                outline="#FFFF00",  # Yellow outline
+                width=3  # Thick outline
+            )
+            
+            # Display text with much larger font and bright color
+            self.live_transcription_text_id = self.current_scene.center_text(
+                text=display_text,
+                y=text_position_y,  # Position below the image
+                font_size=adaptive_font_size,
+                fill="#FFFF00",  # Bright yellow for better visibility
+                width=adaptive_width  # Adaptive width for wrapping
+            )
+            
+            # Force a complete redraw
+            self.root.update()
+            
+            # Print confirmation that text is being displayed
+            print(f"Displaying text on screen: {display_text[:50]}...")
+            
+            # Force a complete redraw of the window
+            try:
+                self.root.update()
+            except Exception as e:
+                print(f"Error updating window: {e}")
+            
+            # Update the window
+            self.root.update_idletasks()
             
         except Exception as e:
-            print(f"Error processing voice: {e}")
-            self.root.after(0, self.show_error, str(e))
-        finally:
-            # Reset the flags
-            self.is_recording = False
-            self.is_processing = False
+            print(f"Error updating live transcription: {e}")
+    
+    def stop_current_processes(self):
+        """Stop any active recording or processing"""
+        # If live transcription is active, stop it
+        if self.live_transcription_active:
+            self.voice_processor.stop_live_transcription()
+            self.live_transcription_active = False
+            
+        # If recording is in progress, stop it
+        if self.is_recording:
+            # If there's an active voice processor recording, stop it
+            try:
+                self.voice_processor.recorder.stop_recording()
+            except:
+                pass
+            
+        # If camera is active, stop it
+        if hasattr(self, 'camera_active') and self.camera_active:
+            print("Camera stopped")
+            # Here you would actually stop the camera
+            self.camera_active = False
+            
+        # Reset all states
+        self.is_recording = False
+        self.is_processing = False
+        self.is_scene_active = False
+        self.is_showing_results = False
+        
+        # Print a confirmation that everything is stopped
+        print("All processes stopped, ready for scene navigation")
     
     def show_recording_screen(self):
         """Show the recording screen"""
@@ -236,12 +556,6 @@ class TranslationApp:
             # Format and display the translation
             self.format_and_display_text(self.last_translation, y_pos)
         
-        # Show instructions
-        self.current_scene.center_text(
-            "Press 3 to go back", 
-            1000, font_size=30
-        )
-        
         # Update immediately
         self.root.update_idletasks()
     
@@ -280,44 +594,15 @@ class TranslationApp:
         self.current_scene.canvas.create_rectangle(0, 0, 720, 1080, fill="#000000", outline="")
         self.current_scene.center_text("Error", 400, font_size=50, fill="#FF0000")
         self.current_scene.center_text(error_msg, 500, font_size=30)
-        self.current_scene.center_text("Press 3 to go back", 700, font_size=30)
         self.is_showing_results = True
         self.root.update_idletasks()
-    
-    def handle_context_action(self):
-        """Handle context-dependent actions for Button 3"""
-        if self.is_recording or self.is_processing:
-            print("Cannot perform action while recording or processing")
-            return
-            
-        if self.is_showing_results:
-            # If showing results, go back to the scene
-            self.current_scene.clear()
-            self.current_scene.setup()  # Reload the scene content
-            
-            # Reset state
-            self.is_showing_results = False
-            
-            # Update immediately
-            self.root.update_idletasks()
-            return
-            
-        # Scene-specific actions when not showing results
-        if self.current_scene_index == 0:  # Scene 1 (Speech to Text)
-            # Manual translation if needed
-            print("Scene 1 context action")
-        elif self.current_scene_index == 1:  # Scene 2 (Auto Detect)
-            # Manual translation if needed
-            print("Scene 2 context action")
-        elif self.current_scene_index == 2:  # Scene 3 (Video Record)
-            # Auto mode already handles this in trigger_transcription
-            print("Scene 3 context action")
     
     def exit_app(self, event=None):
         """Exit the application cleanly"""
         print("Exiting application...")
         
         # Clean up resources
+        self.stop_current_processes()
         self.input_handler.cleanup()
         self.voice_processor.cleanup()
         
@@ -339,4 +624,4 @@ class TranslationApp:
 
 if __name__ == "__main__":
     app = TranslationApp()
-    app.run() 
+    app.run()

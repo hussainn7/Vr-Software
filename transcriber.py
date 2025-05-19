@@ -25,14 +25,60 @@ class AudioRecorder:
         self.frames = []
         self.is_recording = False
         self.recording_thread = None
+        self.continuous_mode = False
+        self.buffer_seconds = 3  # Buffer size in seconds for continuous mode
+        
+        # Check available audio devices
+        self._check_audio_devices()
     
-    def start_recording(self):
+    def _check_audio_devices(self):
+        """Check available audio input devices and select the best one"""
+        try:
+            print("\nChecking audio devices:")
+            info = self.audio.get_host_api_info_by_index(0)
+            num_devices = info.get('deviceCount')
+            
+            # Find input devices
+            input_devices = []
+            for i in range(num_devices):
+                device_info = self.audio.get_device_info_by_host_api_device_index(0, i)
+                if device_info.get('maxInputChannels') > 0:
+                    input_devices.append((i, device_info))
+                    print(f"  Input Device {i}: {device_info.get('name')}")
+            
+            if not input_devices:
+                print("WARNING: No input devices found!")
+            else:
+                print(f"Found {len(input_devices)} input devices")
+                
+            # Try to find the default input device
+            try:
+                default_input = self.audio.get_default_input_device_info()
+                print(f"Default input device: {default_input.get('name')} (index {default_input.get('index')})")
+                self.input_device_index = default_input.get('index')
+            except Exception as e:
+                print(f"Could not get default input device: {e}")
+                # If we can't get the default, use the first available input device
+                if input_devices:
+                    self.input_device_index = input_devices[0][0]
+                    print(f"Using first available input device: {input_devices[0][1].get('name')}")
+                else:
+                    self.input_device_index = None
+                    print("WARNING: No input device selected!")
+        except Exception as e:
+            print(f"Error checking audio devices: {e}")
+            self.input_device_index = None
+    
+    def start_recording(self, continuous=False):
         """Start recording audio"""
         if self.is_recording:
             return
             
         self.frames = []
         self.is_recording = True
+        self.continuous_mode = continuous
+        
+        print(f"Starting audio recording (continuous={continuous})")
         
         # Start a new thread for recording
         self.recording_thread = threading.Thread(target=self._record)
@@ -41,44 +87,90 @@ class AudioRecorder:
         
     def _record(self):
         """Record audio in a separate thread"""
-        self.stream = self.audio.open(
-            format=self.format,
-            channels=self.channels,
-            rate=self.rate,
-            input=True,
-            frames_per_buffer=self.chunk
-        )
-        
-        while self.is_recording:
-            try:
-                data = self.stream.read(self.chunk)
-                self.frames.append(data)
-            except Exception as e:
-                print(f"Error recording audio: {e}")
-                break
-    
-    def stop_recording(self):
-        """Stop recording audio"""
-        if not self.is_recording:
-            return
+        try:
+            # Open the audio stream with the selected input device if available
+            kwargs = {
+                'format': self.format,
+                'channels': self.channels,
+                'rate': self.rate,
+                'input': True,
+                'frames_per_buffer': self.chunk
+            }
             
-        self.is_recording = False
+            # Add input device index if available
+            if hasattr(self, 'input_device_index') and self.input_device_index is not None:
+                kwargs['input_device_index'] = self.input_device_index
+                
+            self.stream = self.audio.open(**kwargs)
+            print(f"Audio stream opened successfully with rate={self.rate}, channels={self.channels}")
+        except Exception as e:
+            print(f"Error opening audio stream: {e}")
+            self.is_recording = False
+            return
         
+        # For continuous mode, maintain a rolling buffer
+        if self.continuous_mode:
+            max_frames = int(self.rate / self.chunk * self.buffer_seconds)
+            
+            while self.is_recording:
+                try:
+                    data = self.stream.read(self.chunk, exception_on_overflow=False)
+                    self.frames.append(data)
+                    
+                    # Keep only the most recent frames
+                    if len(self.frames) > max_frames:
+                        self.frames.pop(0)
+                except Exception as e:
+                    print(f"Error recording audio: {e}")
+                    break
+        else:
+            # For regular mode, just record until stopped
+            while self.is_recording:
+                try:
+                    data = self.stream.read(self.chunk, exception_on_overflow=False)
+                    self.frames.append(data)
+                except Exception as e:
+                    print(f"Error recording audio: {e}")
+                    break
+        
+        # Clean up
         if self.stream:
             self.stream.stop_stream()
             self.stream.close()
             self.stream = None
+    
+    def stop_recording(self):
+        """Stop recording audio"""
+        if not self.is_recording:
+            print("Not currently recording")
+            return self.frames
             
-        if self.recording_thread:
-            self.recording_thread.join(timeout=2.0)
+        print("Stopping audio recording")
+        self.is_recording = False
+        
+        if self.recording_thread and self.recording_thread.is_alive():
+            self.recording_thread.join(timeout=1.0)
+            print("Recording thread stopped")
+        
+        # Check if we have any frames
+        if not self.frames:
+            print("WARNING: No audio frames were recorded!")
+        else:
+            print(f"Recorded {len(self.frames)} audio frames")
             
         return self.frames
     
-    def save_recording(self, filename="recording.wav"):
-        """Save the recorded audio to a file"""
+    def save_to_wav(self, filename=None):
+        """Save recorded audio to a WAV file"""
         if not self.frames:
             return None
             
+        if filename is None:
+            # Create a temporary file
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                filename = temp_file.name
+        
+        # Save the audio data
         with wave.open(filename, 'wb') as wf:
             wf.setnchannels(self.channels)
             wf.setsampwidth(self.audio.get_sample_size(self.format))
@@ -90,14 +182,14 @@ class AudioRecorder:
     def cleanup(self):
         """Clean up resources"""
         if self.stream:
+            self.stream.stop_stream()
             self.stream.close()
+            
         self.audio.terminate()
 
 
 class WhisperTranscriber:
-    """
-    Transcribes audio using OpenAI's Whisper API
-    """
+    """Transcribes audio using OpenAI's Whisper API"""
     def __init__(self, api_key=None):
         # Use the API key from environment variables or the provided one
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
@@ -106,7 +198,10 @@ class WhisperTranscriber:
             raise ValueError("OpenAI API key is required. Set OPENAI_API_KEY environment variable or provide it during initialization.")
         
         openai.api_key = self.api_key
-    
+        
+        # Print a confirmation that the API key is set
+        print(f"OpenAI API key configured: {self.api_key[:5]}...{self.api_key[-4:]}")
+        
     def transcribe(self, audio_file, language=None):
         """
         Transcribe audio file using Whisper API
@@ -115,50 +210,68 @@ class WhisperTranscriber:
         Returns tuple of (transcription, detected_language)
         """
         try:
-            with open(audio_file, "rb") as file:
-                # Set up options - omit language for auto-detection
-                options = {
-                    "file": file, 
-                    "model": "whisper-1",
-                    "response_format": "verbose_json"  # Get detailed response with language
-                }
+            print(f"Attempting to transcribe audio file: {audio_file}")
+            # Check if file exists
+            if not os.path.exists(audio_file):
+                print(f"Error: Audio file not found: {audio_file}")
+                return "", ""
                 
-                # Only specify language if explicitly provided and not None
+            # Check file size
+            file_size = os.path.getsize(audio_file)
+            print(f"Audio file size: {file_size} bytes")
+            
+            if file_size == 0:
+                print("Error: Audio file is empty")
+                return "", ""
+                
+            # Open the audio file
+            with open(audio_file, "rb") as file:
+                # Call the Whisper API using the updated client format
+                options = {}
                 if language:
                     options["language"] = language
                 
-                # Call the API
-                response = openai.Audio.transcribe(**options)
+                try:
+                    # Try the new client format first
+                    from openai import OpenAI
+                    client = OpenAI(api_key=self.api_key)
+                    
+                    print("Using new OpenAI client format")
+                    response = client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=file,
+                        **options
+                    )
+                    
+                    # Extract the transcription text
+                    transcription = response.text
+                    detected_language = "auto-detected"  # New API doesn't return language
+                    
+                except (ImportError, AttributeError):
+                    # Fall back to legacy format
+                    print("Falling back to legacy OpenAI API format")
+                    response = openai.Audio.transcribe(
+                        model="whisper-1",
+                        file=file,
+                        **options
+                    )
+                    
+                    # Extract the transcription text
+                    transcription = response.get("text", "")
+                    detected_language = response.get("language", "")
                 
-                # Extract the text and detected language
-                if isinstance(response, str):
-                    # Try to parse response if it's a string
-                    try:
-                        response_data = json.loads(response)
-                        transcription = response_data.get("text", "")
-                        detected_lang = response_data.get("language", None)
-                    except:
-                        transcription = response
-                        detected_lang = None
-                else:
-                    # Access as object attributes or dictionary keys
-                    transcription = getattr(response, "text", 
-                                        response.get("text") if hasattr(response, "get") else "")
-                    detected_lang = getattr(response, "language", 
-                                         response.get("language") if hasattr(response, "get") else None)
-                
-                print(f"API detected language: {detected_lang}")
-                return transcription, detected_lang
+                print(f"Transcription successful: {transcription[:50]}...")
+                return transcription, detected_language
                 
         except Exception as e:
-            print(f"Error transcribing audio: {e}")
-            return f"Transcription error: {e}", None
+            print(f"Transcription error: {e}")
+            import traceback
+            traceback.print_exc()
+            return "", ""
 
 
 class Translator:
-    """
-    Translates text using OpenAI's GPT API
-    """
+    """Translates text using OpenAI's GPT API"""
     def __init__(self, api_key=None):
         # Use the API key from environment variables or the provided one
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
@@ -167,40 +280,214 @@ class Translator:
             raise ValueError("OpenAI API key is required. Set OPENAI_API_KEY environment variable or provide it during initialization.")
         
         openai.api_key = self.api_key
-    
+        
     def translate(self, text, source_lang, target_lang):
         """
         Translate text from source language to target language
         """
-        if not text:
+        if not text or text.strip() == "":
+            print("No text to translate")
             return ""
             
         try:
-            prompt = f"Translate the following {source_lang} text to {target_lang}:\n\n{text}"
+            # Prepare the prompt for translation
+            prompt = f"Translate the following {source_lang} text to {target_lang}:\n\n{text}\n\nTranslation:"
             
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a translator. Provide only the translation without explanations."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=1000
-            )
+            print(f"Translating from {source_lang} to {target_lang}...")
             
-            return response.choices[0].message.content.strip()
+            try:
+                # Try the new client format first
+                from openai import OpenAI
+                client = OpenAI(api_key=self.api_key)
+                
+                print("Using new OpenAI client format for translation")
+                response = client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "You are a professional translator."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=1024
+                )
+                
+                # Extract the translation
+                translation = response.choices[0].message.content.strip()
+                
+            except (ImportError, AttributeError):
+                # Fall back to legacy format
+                print("Falling back to legacy OpenAI API format for translation")
+                response = openai.ChatCompletion.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "You are a professional translator."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=1024
+                )
+                
+                # Extract the translation
+                translation = response.choices[0].message.content.strip()
+            
+            print(f"Translation successful: {translation[:50]}...")
+            return translation
+            
         except Exception as e:
-            print(f"Error translating text: {e}")
-            return f"Translation error: {e}"
-            
-            
+            print(f"Translation error: {e}")
+            import traceback
+            traceback.print_exc()
+            return ""
+
+
 class VoiceProcessor:
-    """
-    Handles the full voice processing workflow
-    """
+    """Handles the full voice processing workflow"""
     def __init__(self):
         self.recorder = AudioRecorder()
         self.transcriber = WhisperTranscriber()
         self.translator = Translator()
+        self.live_mode = False
+        self.processing_thread = None
+        self.should_process = False
+        self.callback = None
+        
+    def start_live_transcription(self, source_lang=None, target_lang=None, callback=None):
+        """
+        Start continuous live transcription
+        
+        source_lang: Language of the spoken input, or None for auto-detection
+        target_lang: Target language for translation, or None for auto-detection
+        callback: Function to call with new transcription results
+        """
+        if self.live_mode:
+            return
+            
+        self.live_mode = True
+        self.should_process = True
+        self.callback = callback
+        
+        # Start recording in continuous mode
+        self.recorder.start_recording(continuous=True)
+        
+        # Start processing thread
+        self.processing_thread = threading.Thread(
+            target=self._live_processing_loop,
+            args=(source_lang, target_lang)
+        )
+        self.processing_thread.daemon = True
+        self.processing_thread.start()
+        
+        print(f"Live transcription started (language: {source_lang or 'auto-detect'})...")
+        
+    def _live_processing_loop(self, source_lang, target_lang):
+        """Background thread for live processing"""
+        last_process_time = 0
+        process_interval = 2.0  # Process every 2 seconds
+        
+        while self.should_process:
+            current_time = time.time()
+            
+            # Process at regular intervals
+            if current_time - last_process_time >= process_interval:
+                last_process_time = current_time
+                
+                # Make a copy of the current frames
+                if self.recorder.frames:
+                    frames_copy = self.recorder.frames.copy()
+                    
+                    try:
+                        # Save to temporary file
+                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                            audio_file = temp_file.name
+                            
+                        # Save the audio data
+                        with wave.open(audio_file, 'wb') as wf:
+                            wf.setnchannels(self.recorder.channels)
+                            wf.setsampwidth(self.recorder.audio.get_sample_size(self.recorder.format))
+                            wf.setframerate(self.recorder.rate)
+                            wf.writeframes(b''.join(frames_copy))
+                        
+                        # Transcribe the audio
+                        transcription, detected_lang = self.transcriber.transcribe(audio_file, source_lang)
+                        
+                        if detected_lang:
+                            print(f"API detected language: {detected_lang}")
+                            
+                        # Map language names to codes for consistency
+                        language_code_map = {
+                            "english": "en",
+                            "russian": "ru",
+                            "spanish": "es",
+                            "french": "fr",
+                            "german": "de",
+                            "japanese": "ja",
+                            "italian": "it",
+                            "chinese": "zh",
+                            "korean": "ko"
+                        }
+                        
+                        # Standardize language code
+                        if detected_lang and detected_lang.lower() in language_code_map:
+                            detected_lang_code = language_code_map[detected_lang.lower()]
+                        else:
+                            detected_lang_code = detected_lang.lower() if detected_lang else None
+                        
+                        # Determine source and target languages
+                        actual_source_lang = source_lang or detected_lang_code or "en"
+                        
+                        # Handle translation based on detected language
+                        translation = None
+                        
+                        # If we have a target language and a transcription
+                        if target_lang and transcription and detected_lang_code:
+                            # Logic for Russian translation (target_lang = "ru")
+                            if target_lang == "ru" and detected_lang_code == "en":
+                                print(f"Translating English to Russian...")
+                                translation = self.translator.translate(transcription, "en", "ru")
+                            
+                            # Logic for English translation (target_lang = "en")
+                            elif target_lang == "en" and detected_lang_code == "ru":
+                                print(f"Translating Russian to English...")
+                                translation = self.translator.translate(transcription, "ru", "en")
+                            
+                            # Special case for other detected languages
+                            elif detected_lang_code not in ["en", "ru"]:
+                                # Always translate other languages to the target
+                                print(f"Translating {detected_lang} to {target_lang}...")
+                                translation = self.translator.translate(transcription, detected_lang_code, target_lang)
+                        
+                        # Clean up temp file
+                        try:
+                            os.unlink(audio_file)
+                        except:
+                            pass
+                        
+                        # Call the callback function with results
+                        if self.callback:
+                            self.callback(transcription, translation, detected_lang)
+                            
+                    except Exception as e:
+                        print(f"Live processing error: {e}")
+                        
+            # Sleep a bit to reduce CPU usage
+            time.sleep(0.1)
+        
+    def stop_live_transcription(self):
+        """Stop live transcription"""
+        if not self.live_mode:
+            return
+            
+        self.should_process = False
+        self.live_mode = False
+        
+        # Stop recording
+        self.recorder.stop_recording()
+        
+        # Wait for processing thread to finish
+        if self.processing_thread and self.processing_thread.is_alive():
+            self.processing_thread.join(timeout=1.0)
+            
+        print("Live transcription stopped")
         
     def process_voice(self, source_lang, target_lang=None, auto_mode=False):
         """
@@ -212,98 +499,56 @@ class VoiceProcessor:
         
         Returns a tuple of (transcription, translation, detected_language)
         """
+        print("Recording... Speak now.")
+        
         # Start recording
-        print(f"Recording started (language: {source_lang or 'auto-detect'})...")
         self.recorder.start_recording()
         
         # Record for 5 seconds
         time.sleep(5)
         
         # Stop recording
-        print("Recording stopped")
+        print("Recording stopped. Processing...")
         self.recorder.stop_recording()
         
-        # Save the recording to a temporary file
-        temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        audio_file = self.recorder.save_recording(temp_file.name)
+        # Save to temporary file
+        audio_file = self.recorder.save_to_wav()
         
+        if not audio_file:
+            print("No audio recorded")
+            return "", "", ""
+            
         # Transcribe the audio
-        print(f"Transcribing in {source_lang or 'auto-detect mode'}...")
-        transcription, detected_lang = self.transcriber.transcribe(audio_file, source_lang)
+        transcription, detected_language = self.transcriber.transcribe(audio_file, source_lang)
+        
+        print(f"Detected language: {detected_language}")
         print(f"Transcription: {transcription}")
-        print(f"Detected language: {detected_lang}")
         
-        # Convert detected language to standard code format if needed
-        # Whisper might return full language name or code
-        language_code_map = {
-            "english": "en",
-            "russian": "ru",
-            "japanese": "ja",
-            "french": "fr",
-            "german": "de",
-            "spanish": "es",
-            "italian": "it",
-            "chinese": "zh",
-            "korean": "ko"
-        }
-        
-        # Standardize detected language to code format (en, ru, ja, etc.)
-        if detected_lang and detected_lang.lower() in language_code_map:
-            detected_lang_code = language_code_map[detected_lang.lower()]
-        else:
-            detected_lang_code = detected_lang.lower() if detected_lang else None
-        
-        # Determine the source language either from input or detection
-        actual_source_lang = source_lang or detected_lang_code or "en"
-        
-        # Determine target language if not specified
-        if target_lang is None:
-            # Default rules
-            if actual_source_lang != "en":
-                target_lang = "en"
-            else:
-                target_lang = "ru"
-        else:
-            # Force English->Russian and Russian->English regardless of scene
-            if (actual_source_lang == "en" or detected_lang_code == "en" or 
-                detected_lang and "english" in detected_lang.lower()):
-                print("English speech detected, forcing translation to Russian")
-                target_lang = "ru"
-            elif (actual_source_lang == "ru" or detected_lang_code == "ru" or 
-                  detected_lang and "russian" in detected_lang.lower()):
-                print("Russian speech detected, forcing translation to English")
-                target_lang = "en"
-        
-        # Translate if needed or in auto mode
+        # Determine target language based on detected language
         translation = None
-        if auto_mode or target_lang != actual_source_lang:
-            print(f"Translating from {actual_source_lang} to {target_lang}...")
-            translation = self.translator.translate(transcription, actual_source_lang, target_lang)
-            print(f"Translation: {translation}")
         
-        # Clean up temporary file
+        if transcription:
+            # If target language is specified, use it
+            if target_lang:
+                translation = self.translator.translate(transcription, detected_language or source_lang or "en", target_lang)
+            # Otherwise, determine based on detected language
+            elif detected_language and "english" in detected_language.lower():
+                translation = self.translator.translate(transcription, "en", "ru")
+            elif detected_language and "russian" in detected_language.lower():
+                translation = self.translator.translate(transcription, "ru", "en")
+            
+            if translation:
+                print(f"Translation: {translation}")
+        
+        # Clean up the temporary file
         try:
-            os.unlink(temp_file.name)
+            os.unlink(audio_file)
         except:
             pass
             
-        # Convert language code to a more friendly name for display
-        language_names = {
-            "en": "english",
-            "ru": "russian",
-            "ja": "japanese",
-            "fr": "french",
-            "de": "german",
-            "es": "spanish",
-            "it": "italian",
-            "zh": "chinese",
-            "ko": "korean"
-        }
-        
-        friendly_lang = language_names.get(detected_lang_code, detected_lang) if detected_lang else "unknown"
-            
-        return (transcription, translation, friendly_lang)
+        return transcription, translation, detected_language
         
     def cleanup(self):
         """Clean up resources"""
-        self.recorder.cleanup() 
+        self.stop_live_transcription()
+        self.recorder.cleanup()
