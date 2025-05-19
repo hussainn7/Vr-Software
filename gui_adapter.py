@@ -2,7 +2,9 @@ import os
 import sys
 import tkinter as tk
 from tkinter import Canvas, PhotoImage
+from PIL import Image, ImageTk
 from pathlib import Path
+import math
 
 class GUIAdapter:
     """Base adapter class for GUI files"""
@@ -12,6 +14,7 @@ class GUIAdapter:
         self.assets = {}
         self.is_visible = False
         self.mirrored = True  # Enable mirroring by default for VR glasses
+        self.rotated = True  # Enable 90 degree rotation to the left
         
     def setup(self):
         """To be implemented by child classes"""
@@ -52,12 +55,11 @@ class GUIAdapter:
             )
     
     def center_text(self, text, y, font_size=40, fill="#FFFFFF", font_family="Arial Bold", width=None):
-        """Show centered text on the canvas with simple mirroring for VR glasses"""
+        """Show centered text on the canvas with simple mirroring for VR glasses and rotation"""
         if self.canvas:
             # Get canvas dimensions for proper centering
             canvas_width = self.canvas.winfo_width() or 720  # Default to 720 if not yet rendered
             canvas_height = self.canvas.winfo_height() or 1080  # Default to 1080 if not yet rendered
-            canvas_center = canvas_width / 2
             
             # Make font size larger for better visibility
             scaled_font_size = int(font_size * 1.5)  # Make text 50% larger
@@ -85,28 +87,66 @@ class GUIAdapter:
                 mirrored_text = text[::-1]
                 kwargs["text"] = mirrored_text
             
-            # Create the text with a black outline for better visibility
-            # First create a black shadow/outline
-            outline_id = self.canvas.create_text(
-                canvas_center,
-                scaled_y,
-                text=kwargs["text"],
-                width=kwargs.get("width"),
-                font=kwargs["font"],
-                fill="black",
-                anchor="center",
-                justify="center"
-            )
-            
-            # Move the outline slightly to create a shadow effect
-            self.canvas.move(outline_id, 2, 2)
-            
-            # Then create the main text on top
-            text_id = self.canvas.create_text(
-                canvas_center,
-                scaled_y,
-                **kwargs
-            )
+            # If rotation is enabled, swap x and y coordinates (90 degrees left rotation)
+            if self.rotated:
+                # For 90 degrees left rotation, x becomes y and y becomes (width - x)
+                canvas_center_x = canvas_width / 2
+                canvas_center_y = canvas_height / 2
+                
+                # Rotate coordinates: x becomes y, y becomes (width - x)
+                rotated_x = scaled_y
+                rotated_y = canvas_width - canvas_center_x
+                
+                # Create the text with a black outline for better visibility
+                # First create a black shadow/outline
+                outline_id = self.canvas.create_text(
+                    rotated_x,
+                    rotated_y,
+                    text=kwargs["text"],
+                    width=kwargs.get("width"),
+                    font=kwargs["font"],
+                    fill="black",
+                    anchor="center",
+                    justify="center",
+                    angle=90  # Rotate text 90 degrees
+                )
+                
+                # Move the outline slightly to create a shadow effect
+                self.canvas.move(outline_id, 2, 2)
+                
+                # Then create the main text on top
+                text_id = self.canvas.create_text(
+                    rotated_x,
+                    rotated_y,
+                    angle=90,  # Rotate text 90 degrees
+                    **kwargs
+                )
+            else:
+                # Standard non-rotated display
+                canvas_center = canvas_width / 2
+                
+                # Create the text with a black outline for better visibility
+                # First create a black shadow/outline
+                outline_id = self.canvas.create_text(
+                    canvas_center,
+                    scaled_y,
+                    text=kwargs["text"],
+                    width=kwargs.get("width"),
+                    font=kwargs["font"],
+                    fill="black",
+                    anchor="center",
+                    justify="center"
+                )
+                
+                # Move the outline slightly to create a shadow effect
+                self.canvas.move(outline_id, 2, 2)
+                
+                # Then create the main text on top
+                text_id = self.canvas.create_text(
+                    canvas_center,
+                    scaled_y,
+                    **kwargs
+                )
             
             return text_id
             
@@ -146,21 +186,27 @@ class GUI(GUIAdapter):
         if self.master is None:
             self.master = tk.Tk()
         if self.canvas is None:
+            # For 90 degree rotation, swap width and height
+            if self.rotated:
+                width = 1080
+                height = 720
+            else:
+                width = 720
+                height = 1080
+                
             # Center the window on the screen
             self.master.update_idletasks()
-            width = 720
-            height = 1080
             x = (self.master.winfo_screenwidth() // 2) - (width // 2)
             y = (self.master.winfo_screenheight() // 2) - (height // 2)
             self.master.geometry(f"{width}x{height}+{x}+{y}")
             self.master.configure(bg="#000000")
             
-            # Create the canvas
+            # Create the canvas with rotated dimensions
             self.canvas = Canvas(
                 self.master,
                 bg="#000000",
-                height=1080,
-                width=720,
+                height=height,
+                width=width,
                 bd=0,
                 highlightthickness=0,
                 relief="ridge"
@@ -173,20 +219,37 @@ class GUI(GUIAdapter):
             # Load image
             try:
                 image_path = assets_path / "image_1.png"
-                image = PhotoImage(file=str(image_path))
-                self.assets["image_1.png"] = image
                 
-                # Place the image at the center of the canvas
-                self.canvas.create_image(
-                    360.0,  # Centered horizontally
-                    425.0,
-                    image=image
-                )
+                if self.rotated:
+                    # Load with PIL to rotate
+                    pil_image = Image.open(str(image_path))
+                    pil_image = pil_image.rotate(90, expand=True)  # Rotate 90 degrees left
+                    image = ImageTk.PhotoImage(pil_image)
+                    self.assets["image_1.png"] = image
+                    
+                    # Place the rotated image
+                    self.canvas.create_image(
+                        width / 2,  # Centered horizontally in the rotated canvas
+                        height / 2,  # Centered vertically in the rotated canvas
+                        image=image,
+                        anchor="center"
+                    )
+                else:
+                    # Standard non-rotated display
+                    image = PhotoImage(file=str(image_path))
+                    self.assets["image_1.png"] = image
+                    
+                    # Place the image at the center of the canvas
+                    self.canvas.create_image(
+                        360.0,  # Centered horizontally
+                        425.0,
+                        image=image
+                    )
             except Exception as e:
                 print(f"Error loading image: {e}")
             
             # Add centered text with larger font
-            self.center_text("Live Transcription", 711.0, font_size=70)
+            self.center_text(" ", 711.0, font_size=70)
             
             self.master.resizable(False, False)
         
@@ -204,21 +267,27 @@ class GUI1(GUIAdapter):
         if self.master is None:
             self.master = tk.Tk()
         if self.canvas is None:
+            # For 90 degree rotation, swap width and height
+            if self.rotated:
+                width = 1080
+                height = 720
+            else:
+                width = 720
+                height = 1080
+                
             # Center the window on the screen
             self.master.update_idletasks()
-            width = 720
-            height = 1080
             x = (self.master.winfo_screenwidth() // 2) - (width // 2)
             y = (self.master.winfo_screenheight() // 2) - (height // 2)
             self.master.geometry(f"{width}x{height}+{x}+{y}")
             self.master.configure(bg="#000000")
             
-            # Create the canvas
+            # Create the canvas with rotated dimensions
             self.canvas = Canvas(
                 self.master,
                 bg="#000000",
-                height=1080,
-                width=720,
+                height=height,
+                width=width,
                 bd=0,
                 highlightthickness=0,
                 relief="ridge"
@@ -231,20 +300,37 @@ class GUI1(GUIAdapter):
             # Load image
             try:
                 image_path = assets_path / "image_1.png"
-                image = PhotoImage(file=str(image_path))
-                self.assets["image_1.png"] = image
                 
-                # Place the image at the center of the canvas
-                self.canvas.create_image(
-                    360.0,  # Centered horizontally
-                    401.0,
-                    image=image
-                )
+                if self.rotated:
+                    # Load with PIL to rotate
+                    pil_image = Image.open(str(image_path))
+                    pil_image = pil_image.rotate(90, expand=True)  # Rotate 90 degrees left
+                    image = ImageTk.PhotoImage(pil_image)
+                    self.assets["image_1.png"] = image
+                    
+                    # Place the rotated image
+                    self.canvas.create_image(
+                        width / 2,  # Centered horizontally in the rotated canvas
+                        height / 2,  # Centered vertically in the rotated canvas
+                        image=image,
+                        anchor="center"
+                    )
+                else:
+                    # Standard non-rotated display
+                    image = PhotoImage(file=str(image_path))
+                    self.assets["image_1.png"] = image
+                    
+                    # Place the image at the center of the canvas
+                    self.canvas.create_image(
+                        360.0,  # Centered horizontally
+                        401.0,
+                        image=image
+                    )
             except Exception as e:
                 print(f"Error loading image: {e}")
             
             # Add centered text with larger font
-            self.center_text("Russian Translation", 727.0, font_size=70)
+            self.center_text(" ", 727.0, font_size=70)
             
             self.master.resizable(False, False)
         
@@ -262,46 +348,73 @@ class GUI2(GUIAdapter):
         if self.master is None:
             self.master = tk.Tk()
         if self.canvas is None:
+            # For 90 degree rotation, swap width and height
+            if self.rotated:
+                width = 1080
+                height = 720
+                canvas_width = width
+            else:
+                width = 720
+                height = 1080
+                canvas_width = width
+                
             # Center the window on the screen
             self.master.update_idletasks()
-            width = 720
-            height = 1080
             x = (self.master.winfo_screenwidth() // 2) - (width // 2)
             y = (self.master.winfo_screenheight() // 2) - (height // 2)
             self.master.geometry(f"{width}x{height}+{x}+{y}")
             self.master.configure(bg="#000000")
             
-            # Create the canvas
+            # Create the canvas with rotated dimensions
             self.canvas = Canvas(
                 self.master,
                 bg="#000000",
-                height=1080,
-                width=720,
+                height=height,
+                width=width,
                 bd=0,
                 highlightthickness=0,
                 relief="ridge"
             )
             
             # Get the exact center of the canvas
-            canvas_width = 720
-            canvas_center_x = canvas_width / 2  # 360
+            canvas_center_x = canvas_width / 2
             
-            # Create perfectly centered background rectangle
-            rect_width = 494  # 607 - 113
-            rect_height = 494  # 636 - 142
-            rect_left = canvas_center_x - (rect_width / 2)
-            rect_right = canvas_center_x + (rect_width / 2)
-            rect_top = 293  # Center vertically (1080/2 - rect_height/2)
-            rect_bottom = rect_top + rect_height
-            
-            self.canvas.create_rectangle(
-                rect_left,
-                rect_top,
-                rect_right,
-                rect_bottom,
-                fill="#92FBFF",
-                outline=""
-            )
+            if self.rotated:
+                # For rotated view, adjust the rectangle position
+                rect_width = 494
+                rect_height = 494
+                
+                # In rotated view, swap coordinates
+                rect_left = height / 2 - rect_height / 2  # Center vertically in rotated view
+                rect_right = height / 2 + rect_height / 2
+                rect_top = width / 2 - rect_width / 2  # Center horizontally in rotated view
+                rect_bottom = width / 2 + rect_width / 2
+                
+                self.canvas.create_rectangle(
+                    rect_left,
+                    rect_top,
+                    rect_right,
+                    rect_bottom,
+                    fill="#92FBFF",
+                    outline=""
+                )
+            else:
+                # Standard non-rotated display
+                rect_width = 494  # 607 - 113
+                rect_height = 494  # 636 - 142
+                rect_left = canvas_center_x - (rect_width / 2)
+                rect_right = canvas_center_x + (rect_width / 2)
+                rect_top = 293  # Center vertically (1080/2 - rect_height/2)
+                rect_bottom = rect_top + rect_height
+                
+                self.canvas.create_rectangle(
+                    rect_left,
+                    rect_top,
+                    rect_right,
+                    rect_bottom,
+                    fill="#92FBFF",
+                    outline=""
+                )
             
             # Set the assets path
             script_dir = Path(__file__).parent
@@ -310,21 +423,38 @@ class GUI2(GUIAdapter):
             # Load image
             try:
                 image_path = assets_path / "image_1.png"
-                image = PhotoImage(file=str(image_path))
-                self.assets["image_1.png"] = image
                 
-                # Place the image exactly at the center of the canvas
-                self.canvas.create_image(
-                    canvas_center_x,  # Exactly centered horizontally
-                    540,  # Center of the screen vertically (1080/2)
-                    image=image,
-                    anchor="center"  # Important: use center anchor for proper centering
-                )
+                if self.rotated:
+                    # Load with PIL to rotate
+                    pil_image = Image.open(str(image_path))
+                    pil_image = pil_image.rotate(90, expand=True)  # Rotate 90 degrees left
+                    image = ImageTk.PhotoImage(pil_image)
+                    self.assets["image_1.png"] = image
+                    
+                    # Place the rotated image at the center
+                    self.canvas.create_image(
+                        width / 2,  # Center horizontally in rotated view
+                        height / 2,  # Center vertically in rotated view
+                        image=image,
+                        anchor="center"
+                    )
+                else:
+                    # Standard non-rotated display
+                    image = PhotoImage(file=str(image_path))
+                    self.assets["image_1.png"] = image
+                    
+                    # Place the image exactly at the center of the canvas
+                    self.canvas.create_image(
+                        canvas_center_x,  # Exactly centered horizontally
+                        540,  # Center of the screen vertically (1080/2)
+                        image=image,
+                        anchor="center"  # Important: use center anchor for proper centering
+                    )
             except Exception as e:
                 print(f"Error loading image: {e}")
             
             # Add centered text with larger font
-            self.center_text("Camera Mode", 749.0, font_size=70)
+            self.center_text(" ", 749.0, font_size=70)
             
             self.master.resizable(False, False)
         

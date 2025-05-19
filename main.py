@@ -318,7 +318,7 @@ class TranslationApp:
         self.current_scene.canvas.create_rectangle(0, 0, 720, 1080, fill="#000000", outline="")
         
         # Add a header - store the ID to update it later
-        header_title = "Russian Translation" if self.current_scene_index == 1 else "Live Transcription"
+        header_title = " " if self.current_scene_index == 1 else " "
         self.header_text_id = self.current_scene.center_text(header_title, 100, font_size=40)
         self.detected_language_text_id = self.current_scene.center_text("Listening...", 160, font_size=30)
         
