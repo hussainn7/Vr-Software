@@ -15,7 +15,7 @@ class AudioRecorder:
     """
     Records audio from the microphone
     """
-    def __init__(self, rate=16000, channels=1, chunk=1024, format=pyaudio.paInt16):
+    def __init__(self, rate=44100, channels=1, chunk=1024, format=pyaudio.paInt16):
         self.rate = rate
         self.channels = channels
         self.chunk = chunk
@@ -27,6 +27,7 @@ class AudioRecorder:
         self.recording_thread = None
         self.continuous_mode = False
         self.buffer_seconds = 3  # Buffer size in seconds for continuous mode
+        self.frames_lock = threading.Lock()  # Add lock for thread-safe access to frames
         
         # Check available audio devices
         self._check_audio_devices()
@@ -111,24 +112,58 @@ class AudioRecorder:
         # For continuous mode, maintain a rolling buffer
         if self.continuous_mode:
             max_frames = int(self.rate / self.chunk * self.buffer_seconds)
+            frame_count = 0
+            print_interval = int(self.rate / self.chunk)  # Print level info once per second
             
             while self.is_recording:
                 try:
                     data = self.stream.read(self.chunk, exception_on_overflow=False)
-                    self.frames.append(data)
+                    
+                    # Check audio level periodically
+                    frame_count += 1
+                    if frame_count % print_interval == 0:
+                        # Calculate audio level (simple RMS)
+                        try:
+                            import numpy as np
+                            audio_array = np.frombuffer(data, dtype=np.int16)
+                            rms = np.sqrt(np.mean(np.square(audio_array)))
+                            print(f"Audio level: {rms:.2f}")
+                        except ImportError:
+                            pass
+                    
+                    with self.frames_lock:
+                        self.frames.append(data)
                     
                     # Keep only the most recent frames
                     if len(self.frames) > max_frames:
-                        self.frames.pop(0)
+                        with self.frames_lock:
+                            self.frames = self.frames[-max_frames:]
                 except Exception as e:
                     print(f"Error recording audio: {e}")
                     break
         else:
             # For regular mode, just record until stopped
+            frame_count = 0
+            print_interval = int(self.rate / self.chunk)  # Print level info once per second
+            
             while self.is_recording:
                 try:
                     data = self.stream.read(self.chunk, exception_on_overflow=False)
-                    self.frames.append(data)
+                    
+                    # Check audio level periodically
+                    frame_count += 1
+                    if frame_count % print_interval == 0:
+                        # Calculate audio level (simple RMS)
+                        try:
+                            import numpy as np
+                            audio_array = np.frombuffer(data, dtype=np.int16)
+                            rms = np.sqrt(np.mean(np.square(audio_array)))
+                            print(f"Audio level: {rms:.2f}")
+                        except ImportError:
+                            pass
+                    
+                    with self.frames_lock:
+                        self.frames.append(data)
                 except Exception as e:
                     print(f"Error recording audio: {e}")
                     break
@@ -163,8 +198,11 @@ class AudioRecorder:
     def save_to_wav(self, filename=None):
         """Save recorded audio to a WAV file"""
         if not self.frames:
+            print("No audio frames to save")
             return None
-            
+        
+        print(f"Saving {len(self.frames)} audio frames")
+        
         if filename is None:
             # Create a temporary file
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
@@ -175,8 +213,47 @@ class AudioRecorder:
             wf.setnchannels(self.channels)
             wf.setsampwidth(self.audio.get_sample_size(self.format))
             wf.setframerate(self.rate)
-            wf.writeframes(b''.join(self.frames))
+            audio_data = b''.join(self.frames)
+            wf.writeframes(audio_data)
+        
+        # Check if the audio is mostly silence
+        try:
+            import numpy as np
+            audio_array = np.frombuffer(audio_data, dtype=np.int16)
+            rms = np.sqrt(np.mean(np.square(audio_array)))
+            print(f"Overall audio level: {rms:.2f}")
             
+            if rms < 50:  # Arbitrary threshold for silence
+                print("WARNING: Audio appears to be mostly silence")
+            
+            # Normalize audio if levels are too low but not silent
+            if 10 < rms < 500:
+                print("Audio level is low, attempting to normalize...")
+                try:
+                    # Simple normalization to increase volume
+                    max_possible = np.iinfo(np.int16).max
+                    max_current = np.max(np.abs(audio_array))
+                    if max_current > 0:  # Avoid division by zero
+                        gain_factor = max_possible / max_current * 0.8  # 80% of max to avoid clipping
+                        normalized = (audio_array * gain_factor).astype(np.int16)
+                        
+                        # Write normalized audio to a new file
+                        normalized_filename = filename + ".normalized.wav"
+                        with wave.open(normalized_filename, 'wb') as wf_norm:
+                            wf_norm.setnchannels(self.channels)
+                            wf_norm.setsampwidth(self.audio.get_sample_size(self.format))
+                            wf_norm.setframerate(self.rate)
+                            wf_norm.writeframes(normalized.tobytes())
+                        
+                        print(f"Normalized audio saved to {normalized_filename}")
+                        return normalized_filename
+                except Exception as e:
+                    print(f"Error normalizing audio: {e}")
+                    # Fall back to original file if normalization fails
+        except ImportError:
+            pass
+        
+        print(f"Audio saved to {filename}")
         return filename
     
     def cleanup(self):
@@ -202,71 +279,97 @@ class WhisperTranscriber:
         # Print a confirmation that the API key is set
         print(f"OpenAI API key configured: {self.api_key[:5]}...{self.api_key[-4:]}")
         
-    def transcribe(self, audio_file, language=None):
+    def transcribe(self, audio_file, language=None, max_retries=2):
         """
         Transcribe audio file using Whisper API
         language: optional language code (e.g., 'en', 'ru', 'ja')
+        max_retries: number of retries if transcription fails
         
         Returns tuple of (transcription, detected_language)
         """
-        try:
-            print(f"Attempting to transcribe audio file: {audio_file}")
-            # Check if file exists
-            if not os.path.exists(audio_file):
-                print(f"Error: Audio file not found: {audio_file}")
-                return "", ""
+        for attempt in range(max_retries + 1):
+            try:
+                print(f"Transcription attempt {attempt+1}/{max_retries+1}")
+                print(f"Attempting to transcribe audio file: {audio_file}")
+                # Check if file exists
+                if not os.path.exists(audio_file):
+                    print(f"Error: Audio file not found: {audio_file}")
+                    return "", ""
                 
-            # Check file size
-            file_size = os.path.getsize(audio_file)
-            print(f"Audio file size: {file_size} bytes")
-            
-            if file_size == 0:
-                print("Error: Audio file is empty")
-                return "", ""
+                # Check file size
+                file_size = os.path.getsize(audio_file)
+                print(f"Audio file size: {file_size} bytes")
                 
-            # Open the audio file
-            with open(audio_file, "rb") as file:
-                # Call the Whisper API using the updated client format
-                options = {}
-                if language:
-                    options["language"] = language
-                
-                try:
-                    # Try the new client format first
-                    from openai import OpenAI
-                    client = OpenAI(api_key=self.api_key)
+                if file_size == 0:
+                    print("Error: Audio file is empty")
+                    return "", ""
+                elif file_size < 5000:  # Less than 5KB is suspiciously small
+                    print("Warning: Audio file is very small, may not contain enough speech data")
                     
-                    print("Using new OpenAI client format")
-                    response = client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=file,
-                        **options
-                    )
+                # Open the audio file
+                with open(audio_file, "rb") as file:
+                    # Call the Whisper API using the updated client format
+                    options = {}
+                    if language:
+                        options["language"] = language
+                    else:
+                        # If no language specified, try to detect English
+                        options["language"] = "en"
+                        print("No language specified, defaulting to English detection")
                     
-                    # Extract the transcription text
-                    transcription = response.text
-                    detected_language = "auto-detected"  # New API doesn't return language
+                    # Add additional options for better recognition
+                    options["temperature"] = 0.2  # Slightly higher temperature for more flexibility
                     
-                except (ImportError, AttributeError):
-                    # Fall back to legacy format
-                    print("Falling back to legacy OpenAI API format")
-                    response = openai.Audio.transcribe(
-                        model="whisper-1",
-                        file=file,
-                        **options
-                    )
+                    try:
+                        # Try the new client format first
+                        from openai import OpenAI
+                        client = OpenAI(api_key=self.api_key)
+                        
+                        print("Using new OpenAI client format with options:", options)
+                        response = client.audio.transcriptions.create(
+                            model="whisper-1",
+                            file=file,
+                            **options
+                        )
+                        
+                        # Extract the transcription text
+                        transcription = response.text
+                        detected_language = "auto-detected"  # New API doesn't return language
+                        
+                    except (ImportError, AttributeError) as e:
+                        print(f"Error with new client format: {e}, falling back to legacy format")
+                        # Fall back to legacy format
+                        response = openai.Audio.transcribe(
+                            model="whisper-1",
+                            file=file,
+                            **options
+                        )
+                        
+                        # Extract the transcription text
+                        transcription = response.get("text", "")
+                        detected_language = response.get("language", "")
                     
-                    # Extract the transcription text
-                    transcription = response.get("text", "")
-                    detected_language = response.get("language", "")
-                
-                print(f"Transcription successful: {transcription[:50]}...")
+                    if transcription:
+                        print(f"Transcription successful: '{transcription}'")
+                        return transcription, detected_language
+                    else:
+                        print("Transcription returned empty result")
+                        
+                        # If this is not the last attempt, try with different settings
+                        if attempt < max_retries:
+                            print("Retrying with different settings...")
+                            # Try with different temperature on retry
+                            options["temperature"] = 0.4 + (attempt * 0.2)  # Increase temperature with each retry
+                            continue
+                            
+                # If we've exhausted all retries or got a result, return what we have
                 return transcription, detected_language
                 
-        except Exception as e:
-            print(f"Transcription error: {e}")
-            import traceback
-            traceback.print_exc()
+            except Exception as e:
+                print(f"Transcription error: {e}")
+                import traceback
+                traceback.print_exc()
+                
             return "", ""
 
 
@@ -382,21 +485,32 @@ class VoiceProcessor:
     def _live_processing_loop(self, source_lang, target_lang):
         """Background thread for live processing"""
         last_process_time = 0
-        process_interval = 2.0  # Process every 2 seconds
+        last_transcription = ""  # Track last transcription to avoid duplicates
+        process_interval = 0.3  # Process every 0.3 seconds for faster response
         
         while self.should_process:
             current_time = time.time()
             
-            # Process at regular intervals
-            if current_time - last_process_time >= process_interval:
+            # Process at shorter intervals for more real-time feedback
+            if current_time - last_process_time >= process_interval and self.recorder.frames:
                 last_process_time = current_time
                 
                 # Make a copy of the current frames
-                if self.recorder.frames:
+                with self.recorder.frames_lock:
                     frames_copy = self.recorder.frames.copy()
-                    
-                    try:
-                        # Save to temporary file
+                    # Clear frames to prevent reprocessing the same audio
+                    self.recorder.frames.clear()
+                
+                try:
+                    # Process only if we have enough audio data
+                    if frames_copy and len(frames_copy) > 5:  # Ensure we have at least some audio data
+                        # Join the audio frames
+                        audio_data = b''.join(frames_copy)
+                        
+                        # Skip all the energy analysis and just process the audio directly
+                        # This makes it more responsive and simpler
+                        
+                        # Create a temporary file for the audio
                         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
                             audio_file = temp_file.name
                             
@@ -405,10 +519,23 @@ class VoiceProcessor:
                             wf.setnchannels(self.recorder.channels)
                             wf.setsampwidth(self.recorder.audio.get_sample_size(self.recorder.format))
                             wf.setframerate(self.recorder.rate)
-                            wf.writeframes(b''.join(frames_copy))
+                            wf.writeframes(audio_data)
                         
                         # Transcribe the audio
                         transcription, detected_lang = self.transcriber.transcribe(audio_file, source_lang)
+                        
+                        # Simple processing - just use the transcription directly
+                        if not transcription.strip():
+                            print("Empty transcription, skipping")
+                            continue
+                        
+                        # Skip if it's exactly the same as the last transcription
+                        if transcription.strip() == last_transcription.strip():
+                            print(f"Duplicate transcription, skipping")
+                            continue
+                            
+                        # Update last transcription
+                        last_transcription = transcription.strip()
                         
                         if detected_lang:
                             print(f"API detected language: {detected_lang}")
@@ -464,11 +591,12 @@ class VoiceProcessor:
                         
                         # Call the callback function with results
                         if self.callback:
+                            print(f"Displaying text on screen: {transcription}")
                             self.callback(transcription, translation, detected_lang)
                             
-                    except Exception as e:
-                        print(f"Live processing error: {e}")
-                        
+                except Exception as e:
+                    print(f"Live processing error: {e}")
+                    
             # Sleep a bit to reduce CPU usage
             time.sleep(0.1)
         
@@ -504,8 +632,9 @@ class VoiceProcessor:
         # Start recording
         self.recorder.start_recording()
         
-        # Record for 5 seconds
-        time.sleep(5)
+        # Record for 10 seconds (increased from 5 for better speech capture)
+        print("Recording for 10 seconds...")
+        time.sleep(10)
         
         # Stop recording
         print("Recording stopped. Processing...")

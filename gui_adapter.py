@@ -61,26 +61,32 @@ class GUIAdapter:
             canvas_width = self.canvas.winfo_width() or 720  # Default to 720 if not yet rendered
             canvas_height = self.canvas.winfo_height() or 1080  # Default to 1080 if not yet rendered
             
-            # Make font size larger for better visibility
-            scaled_font_size = int(font_size * 1.5)  # Make text 50% larger
+            # Make font size larger for better visibility but not too large to cause cutoff
+            scaled_font_size = int(font_size * 1.2)  # Reduced from 1.5 to prevent cutoff
             
             # Calculate y position as a percentage of screen height for better scaling
+            # Adjust to ensure text is not cut off at the bottom
             y_percent = y / 1080  # Convert fixed y to percentage of reference height
             scaled_y = int(y_percent * canvas_height)  # Apply percentage to actual height
             
             # Create text with optional width constraint for wrapping
+            # Use the provided fill color (default is white)
             kwargs = {
                 "text": text,
                 "anchor": "center",
-                "fill": fill,
+                "fill": fill,  # Use the provided fill color
                 "font": (font_family, scaled_font_size),
                 "justify": "center"
             }
             
             # Add width parameter if provided (for text wrapping)
+            # Use a much smaller width to prevent text from being cut off at edges
             if width:
-                kwargs["width"] = width
-                
+                kwargs["width"] = width * 0.7  # Reduce width by 30% to prevent cutoff
+            else:
+                # Set a default width that's 60% of the canvas width to prevent cutoff
+                kwargs["width"] = canvas_width * 0.6
+            
             # If mirroring is enabled, reverse the text
             if self.mirrored:
                 # Simple mirroring - just reverse the text
@@ -89,32 +95,12 @@ class GUIAdapter:
             
             # If rotation is enabled, swap x and y coordinates (90 degrees left rotation)
             if self.rotated:
-                # For 90 degrees left rotation, x becomes y and y becomes (width - x)
-                canvas_center_x = canvas_width / 2
-                canvas_center_y = canvas_height / 2
+                # For 90 degrees left rotation, adjust positioning to respect the y parameter
+                # Use the provided y position for the rotated x coordinate
+                rotated_x = scaled_y  # The original y becomes the x coordinate
+                rotated_y = canvas_width / 2  # Center horizontally in rotated view
                 
-                # Rotate coordinates: x becomes y, y becomes (width - x)
-                rotated_x = scaled_y
-                rotated_y = canvas_width - canvas_center_x
-                
-                # Create the text with a black outline for better visibility
-                # First create a black shadow/outline
-                outline_id = self.canvas.create_text(
-                    rotated_x,
-                    rotated_y,
-                    text=kwargs["text"],
-                    width=kwargs.get("width"),
-                    font=kwargs["font"],
-                    fill="black",
-                    anchor="center",
-                    justify="center",
-                    angle=90  # Rotate text 90 degrees
-                )
-                
-                # Move the outline slightly to create a shadow effect
-                self.canvas.move(outline_id, 2, 2)
-                
-                # Then create the main text on top
+                # Create the main text - no outline/shadow to keep it clean
                 text_id = self.canvas.create_text(
                     rotated_x,
                     rotated_y,
@@ -122,29 +108,10 @@ class GUIAdapter:
                     **kwargs
                 )
             else:
-                # Standard non-rotated display
-                canvas_center = canvas_width / 2
-                
-                # Create the text with a black outline for better visibility
-                # First create a black shadow/outline
-                outline_id = self.canvas.create_text(
-                    canvas_center,
-                    scaled_y,
-                    text=kwargs["text"],
-                    width=kwargs.get("width"),
-                    font=kwargs["font"],
-                    fill="black",
-                    anchor="center",
-                    justify="center"
-                )
-                
-                # Move the outline slightly to create a shadow effect
-                self.canvas.move(outline_id, 2, 2)
-                
-                # Then create the main text on top
+                # Standard non-rotated display - use center of canvas
                 text_id = self.canvas.create_text(
-                    canvas_center,
-                    scaled_y,
+                    canvas_width / 2,  # Center horizontally
+                    scaled_y,          # Use calculated vertical position
                     **kwargs
                 )
             
@@ -152,29 +119,63 @@ class GUIAdapter:
             
     def show_transcription(self, text):
         """Show transcription text on a black background"""
-        self.clear()
-        # Create black background
-        self.canvas.create_rectangle(0, 0, 720, 1080, fill="#000000", outline="")
+        self.clear()  # Clear all canvas items, including images
+        # Get canvas dimensions
+        canvas_width = self.canvas.winfo_width() or 720  # Default to 720 if not yet rendered
+        canvas_height = self.canvas.winfo_height() or 1080  # Default to 1080 if not yet rendered
         
+        # Create black background covering the entire canvas
+        # Make sure there are no other elements like gray bars
+        self.canvas.create_rectangle(0, 0, canvas_width, canvas_height, fill="#000000", outline="")
+        
+        # If text is empty, just show a blank black screen
+        if not text or text.strip() == "":
+            return
+            
         # Show the transcription text with word wrapping
         lines = []
         current_line = ""
-        max_chars = 40  # Adjust based on your font size
+        # Further reduce max_chars to prevent text from being cut off at edges
+        max_chars = 20  # Significantly reduced to prevent text cutoff
         
+        # Split text into words and handle word wrapping
         for word in text.split():
+            # If adding this word would exceed max_chars, start a new line
             if len(current_line + " " + word) <= max_chars:
                 current_line += " " + word if current_line else word
             else:
                 lines.append(current_line)
                 current_line = word
                 
+        # Add the last line if it has content
         if current_line:
             lines.append(current_line)
+        
+        # If no lines were created (e.g., single very long word), split the text manually
+        if not lines and text:
+            # Split the text into chunks of max_chars
+            for i in range(0, len(text), max_chars):
+                lines.append(text[i:i+max_chars])
+        
+        # Calculate vertical centering with more space at top and bottom
+        total_height = len(lines) * 60  # Increased spacing between lines
+        
+        # Start higher up on the screen to avoid bottom cutoff
+        start_y = (canvas_height - total_height) / 2 - 50  # Shift up by 50 pixels
+        
+        # Ensure start_y is not too low or too high
+        if start_y < 150:
+            start_y = 150  # Increased minimum top margin
+        if start_y + total_height > canvas_height - 150:
+            start_y = canvas_height - total_height - 150  # Ensure bottom margin
             
-        y_pos = 400  # Start position
+        y_pos = start_y  # Start position adjusted vertically
+        
+        # Display each line with proper spacing
         for line in lines:
-            self.center_text(line, y_pos, font_size=30)
-            y_pos += 40
+            # Use white text (#FFFFFF) instead of yellow
+            self.center_text(line, y_pos, font_size=25, fill="#FFFFFF")  # Changed to white
+            y_pos += 60  # Increased spacing between lines for better readability
 
 
 class GUI(GUIAdapter):
@@ -199,6 +200,17 @@ class GUI(GUIAdapter):
             x = (self.master.winfo_screenwidth() // 2) - (width // 2)
             y = (self.master.winfo_screenheight() // 2) - (height // 2)
             self.master.geometry(f"{width}x{height}+{x}+{y}")
+            
+            # Create canvas with black background
+            self.canvas = Canvas(
+                self.master,
+                width=width,
+                height=height,
+                bg="#000000",  # Pure black background
+                highlightthickness=0,  # Remove any border
+                borderwidth=0  # Remove any border
+            )
+            self.canvas.place(x=0, y=0)  # Position at top-left corner
             self.master.configure(bg="#000000")
             
             # Create the canvas with rotated dimensions

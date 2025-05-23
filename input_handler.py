@@ -10,13 +10,21 @@ except (ImportError, ModuleNotFoundError):
     GPIO_AVAILABLE = False
     print("GPIO not available. Running in keyboard-only mode.")
 
-# Try to import keyboard for non-Raspberry Pi testing
-try:
-    import keyboard
-    KEYBOARD_AVAILABLE = True
-except (ImportError, ModuleNotFoundError):
+# Check if we're on macOS
+IS_MACOS = platform.system() == 'Darwin'
+
+# For non-macOS, try to use the keyboard module
+if not IS_MACOS:
+    try:
+        import keyboard
+        KEYBOARD_AVAILABLE = True
+    except (ImportError, ModuleNotFoundError):
+        KEYBOARD_AVAILABLE = False
+        print("Keyboard module not available.")
+else:
+    # On macOS, we'll use Tkinter bindings instead
     KEYBOARD_AVAILABLE = False
-    print("Keyboard module not available.")
+    print("On macOS, using Tkinter for keyboard input instead of keyboard module.")
 
 class InputHandler:
     """
@@ -36,13 +44,14 @@ class InputHandler:
         self.running = False
         self.keyboard_thread = None
         self.buttons = {}
+        self.root = None
         
         # Set up GPIO buttons if available
         if GPIO_AVAILABLE:
             self._setup_gpio()
             
-        # Set up keyboard inputs
-        if KEYBOARD_AVAILABLE:
+        # Set up keyboard inputs if not on macOS
+        if KEYBOARD_AVAILABLE and not IS_MACOS:
             self._setup_keyboard()
     
     def _setup_gpio(self):
@@ -83,6 +92,20 @@ class InputHandler:
         self.keyboard_thread.start()
         
         print("Keyboard input initialized")
+        
+    def setup_tkinter_bindings(self, root):
+        """Set up Tkinter key bindings for macOS"""
+        if not IS_MACOS:
+            return
+            
+        self.root = root
+        
+        # Set up key bindings
+        self.root.bind("1", lambda event: self._button_callback('button1'))
+        self.root.bind("2", lambda event: self._button_callback('button2'))
+        self.root.bind("3", lambda event: self._button_callback('button3'))
+        
+        print("Tkinter keyboard bindings initialized")
     
     def _keyboard_monitor(self):
         """Monitor keyboard inputs in a separate thread"""
@@ -138,6 +161,15 @@ class InputHandler:
         for button in self.buttons.values():
             try:
                 button.close()
+            except:
+                pass
+                
+        # Clean up Tkinter bindings
+        if IS_MACOS and self.root:
+            try:
+                self.root.unbind("1")
+                self.root.unbind("2")
+                self.root.unbind("3")
             except:
                 pass
 

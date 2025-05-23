@@ -74,6 +74,9 @@ class TranslationApp:
         self.input_handler = InputHandler()
         self.setup_button_handlers()
         
+        # Set up Tkinter keyboard bindings if on macOS
+        self.input_handler.setup_tkinter_bindings(self.root)
+        
         # Start with the first scene (gui.py)
         self.load_current_scene()
         
@@ -424,24 +427,18 @@ class TranslationApp:
             adaptive_font_size = int(screen_height * 0.08)  # 8% of screen height (much larger)
             adaptive_width = int(screen_width * 0.9)  # 90% of screen width
             
-            # Add a visual indicator to show where text should appear
-            self.current_scene.canvas.create_rectangle(
-                screen_width * 0.1,  # 10% from left
-                text_position_y - (adaptive_font_size * 1.5),  # Above text
-                screen_width * 0.9,  # 90% from left
-                text_position_y + (adaptive_font_size * 1.5),  # Below text
-                fill="#333333",  # Dark gray background
-                outline="#FFFF00",  # Yellow outline
-                width=3  # Thick outline
-            )
+            # Format text with one word per line for better readability on VR display
+            # Split the text into words and join with newlines
+            words = display_text.split()
+            formatted_text = "\n".join(words)
             
-            # Display text with much larger font and bright color
+            # Display text with much larger font and white color
             self.live_transcription_text_id = self.current_scene.center_text(
-                text=display_text,
-                y=text_position_y,  # Position below the image
+                text=formatted_text,
+                y=text_position_y - 100,  # Position higher to accommodate multiple lines
                 font_size=adaptive_font_size,
-                fill="#FFFF00",  # Bright yellow for better visibility
-                width=adaptive_width  # Adaptive width for wrapping
+                fill="#FFFFFF",  # White text for better visibility
+                width=None  # No width constraint since we're manually formatting
             )
             
             # Force a complete redraw
@@ -592,7 +589,7 @@ class TranslationApp:
             
         self.current_scene.clear()
         self.current_scene.canvas.create_rectangle(0, 0, 720, 1080, fill="#000000", outline="")
-        self.current_scene.center_text("Error", 400, font_size=50, fill="#FF0000")
+        self.current_scene.center_text("Error", 400, font_size=50, fill="#FFFFFF")
         self.current_scene.center_text(error_msg, 500, font_size=30)
         self.is_showing_results = True
         self.root.update_idletasks()
