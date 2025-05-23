@@ -44,4 +44,7 @@ Thumbs.db
 *.mp4
 *.wav
 *.avi
-*.mov 
+*.mov
+
+# Environment variables
+.env 
